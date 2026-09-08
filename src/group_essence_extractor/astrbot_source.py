@@ -6,6 +6,7 @@ import re
 from typing import Any, Protocol
 
 from .models import EssenceMessage, MessageTimeRecord
+from .sync_timing import stage
 from .normalization import (
     first_value,
     format_timestamp,
@@ -90,11 +91,12 @@ class AstrBotEssenceSource:
             if normalized_group_id.isdigit()
             else normalized_group_id
         )
-        items = await _call_action(
-            call_action,
-            "get_essence_msg_list",
-            group_id=group_parameter,
-        )
+        with stage("list"):
+            items = await _call_action(
+                call_action,
+                "get_essence_msg_list",
+                group_id=group_parameter,
+            )
         if not isinstance(items, list):
             raise OneBotActionError(
                 "get_essence_msg_list",
@@ -131,11 +133,12 @@ class AstrBotEssenceSource:
                 continue
             detail_requested_ids.add(message_id)
             try:
-                detail = await _call_action(
-                    call_action,
-                    "get_msg",
-                    message_id=message_id,
-                )
+                with stage("detail"):
+                    detail = await _call_action(
+                        call_action,
+                        "get_msg",
+                        message_id=message_id,
+                    )
                 if not isinstance(detail, Mapping):
                     raise OneBotActionError(
                         "get_msg",
@@ -146,13 +149,14 @@ class AstrBotEssenceSource:
             except OneBotActionError as exc:
                 detail_errors[message_id] = exc.public_message
 
-        return normalize_essence_items(
-            valid_items,
-            requested_group_id=normalized_group_id,
-            details=details,
-            detail_errors=detail_errors,
-            detail_requested_ids=detail_requested_ids,
-        )
+        with stage("normalize"):
+            return normalize_essence_items(
+                valid_items,
+                requested_group_id=normalized_group_id,
+                details=details,
+                detail_errors=detail_errors,
+                detail_requested_ids=detail_requested_ids,
+            )
 
     async def get_group_history_times(
         self,

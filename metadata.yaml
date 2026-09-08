@@ -5,7 +5,7 @@ desc: |
   通过管理员和群白名单访问 QQ 群精华消息，支持只读验收、幂等同步、
   发送时间补全、SQLite 本地检索、可选计划任务和自动备份。
   默认开启只读验收并关闭后台任务，不新增 NapCat HTTP 端口，也不保存 NapCat Token。
-version: 0.5.1
+version: 0.5.2
 author: tntexploding
 repo: https://github.com/tntexploding/astrbot_plugin_groupessence
 astrbot_version: ">=4.0.0,<5"

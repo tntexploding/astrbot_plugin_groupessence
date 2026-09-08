@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import re
 from typing import Any
@@ -15,6 +15,7 @@ from .astrbot_source import (
 from .db import EssenceRepository, SaveStats, SearchPage
 from .models import EssenceMessage
 from .normalization import needs_message_detail
+from .sync_timing import measure_sync, stage
 
 
 VALIDATION_FIELDS = {
@@ -98,6 +99,7 @@ class GroupEssencePluginService:
         history_query_limit: int = 100,
         detail_retry_base_minutes: int = 15,
         detail_retry_max_hours: int = 24,
+        timing_logger: Callable[[str], object] | None = None,
     ) -> None:
         self.source = source
         self.repository = repository
@@ -116,6 +118,7 @@ class GroupEssencePluginService:
         )
         self.detail_retry_max_hours = max(1, min(int(detail_retry_max_hours), 168))
         self.operation_lock = asyncio.Lock()
+        self.timing_logger = timing_logger
 
     async def validate(self, event: Any, group_id: str) -> ValidationReport:
         async with self.operation_lock:
@@ -127,46 +130,58 @@ class GroupEssencePluginService:
         return build_validation_report(messages)
 
     async def sync(self, event: Any, group_id: str) -> SyncReport:
+        with measure_sync(self.timing_logger):
+            with stage("queue"):
+                await self.operation_lock.acquire()
+            try:
+                return await self._sync(event, group_id)
+            finally:
+                self.operation_lock.release()
+
+    async def _sync(self, event: Any, group_id: str) -> SyncReport:
         normalized_group_id = _require_group_id(group_id)
-        async with self.operation_lock:
+        with stage("database_read"):
             deferred_detail_ids = await asyncio.to_thread(
                 self.repository.blocked_detail_retry_ids,
                 normalized_group_id,
             )
-            messages = await self.source.get_essence_messages(
-                event,
-                normalized_group_id,
-                detail_request_limit=self.sync_detail_request_limit,
-                skip_detail_ids=deferred_detail_ids,
-            )
-            failed_detail_ids, resolved_detail_ids = _detail_retry_outcomes(messages)
+        messages = await self.source.get_essence_messages(
+            event,
+            normalized_group_id,
+            detail_request_limit=self.sync_detail_request_limit,
+            skip_detail_ids=deferred_detail_ids,
+        )
+        failed_detail_ids, resolved_detail_ids = _detail_retry_outcomes(messages)
+        with stage("database_read"):
             unseen_ids = await asyncio.to_thread(
                 self.repository.unseen_message_ids,
                 normalized_group_id,
                 messages,
             )
-            sender_times_enriched = 0
-            history_lookup_failed = False
-            history_candidates = {
-                message.message_id
-                for message in messages
-                if message.message_id in unseen_ids and not message.sender_time.strip()
-            }
-            if self.history_query_limit and history_candidates:
-                try:
+        sender_times_enriched = 0
+        history_lookup_failed = False
+        history_candidates = {
+            message.message_id
+            for message in messages
+            if message.message_id in unseen_ids and not message.sender_time.strip()
+        }
+        if self.history_query_limit and history_candidates:
+            try:
+                with stage("history"):
                     history = await self.source.get_group_history_times(
                         event,
                         normalized_group_id,
                         limit=self.history_query_limit,
                     )
-                    messages, sender_times_enriched = apply_history_sender_times(
-                        messages,
-                        history,
-                        candidate_message_ids=history_candidates,
-                    )
-                except OneBotActionError:
-                    history_lookup_failed = True
-            try:
+                messages, sender_times_enriched = apply_history_sender_times(
+                    messages,
+                    history,
+                    candidate_message_ids=history_candidates,
+                )
+            except OneBotActionError:
+                history_lookup_failed = True
+        try:
+            with stage("persist"):
                 stats = await asyncio.to_thread(
                     self._persist_messages,
                     normalized_group_id,
@@ -174,8 +189,8 @@ class GroupEssencePluginService:
                     failed_detail_ids,
                     resolved_detail_ids,
                 )
-            except Exception as exc:
-                raise PluginServiceError("数据库同步失败。", type(exc).__name__) from None
+        except Exception as exc:
+            raise PluginServiceError("数据库同步失败。", type(exc).__name__) from None
         return SyncReport(
             collected=len(messages),
             inserted=stats.inserted,
@@ -247,11 +262,12 @@ class GroupEssencePluginService:
     async def status(self) -> StatusReport:
         if not self.repository.db_path.is_file():
             return StatusReport(database_exists=False)
-        async with self.operation_lock:
-            try:
-                audit = await asyncio.to_thread(self.repository.audit)
-            except Exception as exc:
-                raise PluginServiceError("数据库状态读取失败。", type(exc).__name__) from None
+        # Each repository read owns a read-only SQLite connection. It need not
+        # wait for the network/OneBot operation lock; SQLite protects commits.
+        try:
+            audit = await asyncio.to_thread(self.repository.audit)
+        except Exception as exc:
+            raise PluginServiceError("数据库状态读取失败。", type(exc).__name__) from None
         if audit.get("status") != "ok":
             raise PluginServiceError("数据库状态异常。", "audit_error")
         return StatusReport(
@@ -291,17 +307,16 @@ class GroupEssencePluginService:
         normalized_limit = _clamp_limit(limit)
         if not self.repository.db_path.is_file():
             return SearchPage(items=[], total=0, limit=normalized_limit, offset=0)
-        async with self.operation_lock:
-            try:
-                return await asyncio.to_thread(
-                    self.repository.search_page,
-                    group_id=group_id,
-                    content=content,
-                    limit=normalized_limit,
-                    offset=0,
-                )
-            except Exception as exc:
-                raise PluginServiceError("数据库查询失败。", type(exc).__name__) from None
+        try:
+            return await asyncio.to_thread(
+                self.repository.search_page,
+                group_id=group_id,
+                content=content,
+                limit=normalized_limit,
+                offset=0,
+            )
+        except Exception as exc:
+            raise PluginServiceError("数据库查询失败。", type(exc).__name__) from None
 
 
 def build_validation_report(messages: list[EssenceMessage]) -> ValidationReport:

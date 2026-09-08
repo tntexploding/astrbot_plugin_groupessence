@@ -59,6 +59,7 @@ class GroupEssencePlugin(Star):
             history_query_limit=self.settings.history_query_limit,
             detail_retry_base_minutes=self.settings.detail_retry_base_minutes,
             detail_retry_max_hours=self.settings.detail_retry_max_hours,
+            timing_logger=logger.info,
         )
         self.gateway = AstrBotOneBotGateway(
             context,

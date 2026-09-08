@@ -73,7 +73,7 @@ class DistributionContractTests(unittest.TestCase):
         metadata = (PROJECT_ROOT / "metadata.yaml").read_text(encoding="utf-8")
 
         self.assertIn("name: astrbot_plugin_groupessence\n", metadata)
-        self.assertIn("version: 0.5.1\n", metadata)
+        self.assertIn("version: 0.5.2\n", metadata)
         self.assertIn("author: tntexploding\n", metadata)
         self.assertIn(
             "repo: https://github.com/tntexploding/astrbot_plugin_groupessence\n",

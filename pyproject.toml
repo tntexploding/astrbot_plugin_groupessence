@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "astrbot-plugin-groupessence"
-version = "0.5.1"
+version = "0.5.2"
 description = "AstrBot QQ 群精华消息同步与检索插件"
 readme = "README.md"
 license = { file = "LICENSE" }
